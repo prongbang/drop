@@ -93,3 +93,6 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+
+# built SvelteKit app is embedded into the binary, so it must be committed
+!web/build

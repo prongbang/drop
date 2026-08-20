@@ -1,0 +1,14 @@
+@import 'tailwindcss';
+
+@layer base {
+	html {
+		background: white;
+		color-scheme: light dark;
+	}
+
+	@media (prefers-color-scheme: dark) {
+		html {
+			background: var(--color-gray-950);
+		}
+	}
+}
