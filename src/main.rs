@@ -74,8 +74,8 @@ async fn main() {
     // Create a Warp filter to handle requests for static assets
     let static_dir = warp::fs::dir(current_path);
 
-    // File-drop relay shared by every browser on the network, plus a listing of this directory
-    let api = drop::routes(drop::Drops::default()).or(browse::routes(current_dir.clone()));
+    // Peer-to-peer file transfers, plus a listing of this directory
+    let api = drop::routes(drop::Hub::default()).or(browse::routes(current_dir.clone()));
 
     // CORS
     let cors = warp::cors()
@@ -89,12 +89,12 @@ async fn main() {
     let embedded = warp::path::tail().map(|tail: Tail| serve_embedded(tail.as_str()));
 
     // ...but keep the drop UI and its assets reachable even when the directory has its own index.html
-    let drop_ui = warp::path("_drop")
+    let drop_ui = warp::path("drop")
         .and(warp::path::tail())
         .map(|_| serve_embedded("index.html"));
-    let drop_assets = warp::path("_app")
+    let drop_assets = warp::path("app")
         .and(warp::path::tail())
-        .map(|tail: Tail| serve_embedded(&format!("_app/{}", tail.as_str())));
+        .map(|tail: Tail| serve_embedded(&format!("app/{}", tail.as_str())));
 
     // Create the address tuple
     let ip_address = [0, 0, 0, 0];

@@ -49,7 +49,7 @@ async fn read_dir(root: PathBuf, rel: String) -> Option<Vec<Entry>> {
 pub fn routes(
     root: PathBuf,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    warp::path!("_api" / "dir")
+    warp::path!("api" / "dir")
         .and(warp::get())
         .and(warp::query::<Query>())
         .then(move |query: Query| {

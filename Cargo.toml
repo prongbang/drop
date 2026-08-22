@@ -14,3 +14,4 @@ rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 qrcode = { version = "0.14.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 percent-encoding = "2.3.2"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
