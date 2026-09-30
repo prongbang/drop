@@ -9,6 +9,7 @@
 		incoming: boolean;
 	};
 	type Item = { name: string; size: number; dir: boolean };
+	type IconKind = 'folder' | 'image' | 'media' | 'pdf' | 'code' | 'sheet' | 'text' | 'archive' | 'file';
 
 	let me = $state('');
 	let myName = $state('');
@@ -16,9 +17,12 @@
 	let transfers = $state<Transfer[]>([]);
 	let items = $state<Item[]>([]);
 	let path = $state('');
+	let search = $state('');
 	let dragging = $state('');
 	let error = $state('');
 	let picker: HTMLInputElement;
+	let uploadPicker: HTMLInputElement;
+	let uploading = $state(false);
 	let target = '';
 
 	// files wait here until the other side accepts
@@ -102,6 +106,27 @@
 		});
 	}
 
+	async function uploadFiles(list: FileList | null) {
+		const files = Array.from(list ?? []);
+		if (!files.length) return;
+		error = '';
+		uploading = true;
+		try {
+			for (const file of files) {
+				const res = await fetch(
+					`/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
+					{ method: 'POST', body: file }
+				);
+				if (!res.ok) throw new Error(`${file.name} could not be uploaded`);
+			}
+			await listDir();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Files could not be uploaded';
+		} finally {
+			uploading = false;
+		}
+	}
+
 	function status(transfer: Transfer) {
 		if (transfer.stage === 'declined') return 'declined';
 		if (transfer.stage === 'ready') return transfer.incoming ? '' : 'sent';
@@ -110,6 +135,9 @@
 	}
 
 	const segments = $derived(path.split('/').filter(Boolean));
+	const visibleItems = $derived(
+		items.filter((item) => item.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
+	);
 
 	function go(next: string) {
 		path = next;
@@ -118,6 +146,34 @@
 
 	function href(name: string) {
 		return '/' + [...segments, name].map(encodeURIComponent).join('/');
+	}
+
+	function iconKind(item: Item): IconKind {
+		if (item.dir) return 'folder';
+		const extension = item.name.split('.').pop()?.toLowerCase() ?? '';
+		if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp'].includes(extension)) return 'image';
+		if (['mp4', 'mov', 'mkv', 'webm', 'mp3', 'wav', 'flac', 'aac', 'm4a'].includes(extension)) return 'media';
+		if (extension === 'pdf') return 'pdf';
+		if (['js', 'ts', 'jsx', 'tsx', 'html', 'css', 'json', 'rs', 'go', 'py', 'sh', 'yml', 'yaml', 'toml'].includes(extension)) return 'code';
+		if (['csv', 'xls', 'xlsx', 'ods'].includes(extension)) return 'sheet';
+		if (['txt', 'md', 'doc', 'docx', 'rtf'].includes(extension)) return 'text';
+		if (['zip', 'tar', 'gz', '7z', 'rar'].includes(extension)) return 'archive';
+		return 'file';
+	}
+
+	function iconColor(item: Item) {
+		const colors: Record<IconKind, string> = {
+			folder: 'bg-amber-100 text-amber-600 dark:bg-amber-400/15 dark:text-amber-300',
+			image: 'bg-fuchsia-100 text-fuchsia-600 dark:bg-fuchsia-400/15 dark:text-fuchsia-300',
+			media: 'bg-violet-100 text-violet-600 dark:bg-violet-400/15 dark:text-violet-300',
+			pdf: 'bg-rose-100 text-rose-600 dark:bg-rose-400/15 dark:text-rose-300',
+			code: 'bg-sky-100 text-sky-600 dark:bg-sky-400/15 dark:text-sky-300',
+			sheet: 'bg-emerald-100 text-emerald-600 dark:bg-emerald-400/15 dark:text-emerald-300',
+			text: 'bg-blue-100 text-blue-600 dark:bg-blue-400/15 dark:text-blue-300',
+			archive: 'bg-orange-100 text-orange-600 dark:bg-orange-400/15 dark:text-orange-300',
+			file: 'bg-slate-100 text-slate-500 dark:bg-slate-400/15 dark:text-slate-300'
+		};
+		return colors[iconKind(item)];
 	}
 
 	function size(bytes: number) {
@@ -145,6 +201,16 @@
 		class="hidden"
 		onchange={(e) => {
 			offer(target, e.currentTarget.files);
+			e.currentTarget.value = '';
+		}}
+	/>
+	<input
+		bind:this={uploadPicker}
+		type="file"
+		multiple
+		class="hidden"
+		onchange={(e) => {
+			uploadFiles(e.currentTarget.files);
 			e.currentTarget.value = '';
 		}}
 	/>
@@ -212,13 +278,29 @@
 	{/if}
 
 	<section class="flex flex-col gap-2">
-		<h2 class="flex flex-wrap items-center gap-1 text-sm font-medium text-gray-500">
-			<button class="hover:underline" onclick={() => go('')}>Files here</button>
-			{#each segments as segment, i}
-				<span>/</span>
-				<button class="hover:underline" onclick={() => go(segments.slice(0, i + 1).join('/'))}>{segment}</button>
-			{/each}
-		</h2>
+		<input
+			bind:value={search}
+			type="search"
+			placeholder="Search files and folders"
+			aria-label="Search files and folders"
+			class="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 dark:border-gray-700 dark:bg-gray-900"
+		/>
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<h2 class="flex flex-wrap items-center gap-1 text-sm font-medium text-gray-500">
+				<button class="hover:underline" onclick={() => go('')}>Files here</button>
+				{#each segments as segment, i}
+					<span>/</span>
+					<button class="hover:underline" onclick={() => go(segments.slice(0, i + 1).join('/'))}>{segment}</button>
+				{/each}
+			</h2>
+			<button
+				class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60"
+				disabled={uploading}
+				onclick={() => uploadPicker.click()}
+			>
+				{uploading ? 'Uploading…' : 'Upload files'}
+			</button>
+		</div>
 
 		{#if segments.length}
 			<button
@@ -229,23 +311,60 @@
 			</button>
 		{/if}
 
-		{#each items as item (item.name)}
+		{#each visibleItems as item (item.name)}
 			{#if item.dir}
 				<button
-					class="flex items-center justify-between gap-4 rounded-lg border border-gray-200 p-3 text-left hover:border-gray-400 dark:border-gray-800 dark:hover:border-gray-500"
+					class="group flex items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-900"
 					onclick={() => go([...segments, item.name].join('/'))}
 				>
-					<span class="min-w-0 flex-1 truncate">{item.name}/</span>
+					<span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg {iconColor(item)}">
+						<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor">
+							<path d="M3 6.75A1.75 1.75 0 0 1 4.75 5h5.1c.47 0 .92.19 1.25.52l1.23 1.23h6.92A1.75 1.75 0 0 1 21 8.5v8.75A1.75 1.75 0 0 1 19.25 19H4.75A1.75 1.75 0 0 1 3 17.25z" />
+						</svg>
+					</span>
+					<span class="min-w-0 flex-1 truncate text-sm font-medium">{item.name}</span>
+					<svg aria-hidden="true" viewBox="0 0 20 20" class="h-4 w-4 text-gray-400" fill="currentColor">
+						<path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L10.94 10 7.23 6.29a.75.75 0 1 1 1.06-1.06l4.24 4.24a.75.75 0 0 1 0 1.06l-4.24 4.24a.75.75 0 0 1-1.08 0Z" clip-rule="evenodd" />
+					</svg>
 				</button>
 			{:else}
 				<a
-					class="flex items-center justify-between gap-4 rounded-lg border border-gray-200 p-3 hover:border-gray-400 dark:border-gray-800 dark:hover:border-gray-500"
+					class="group flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-900"
 					href={href(item.name)}
 				>
-					<span class="min-w-0 flex-1 truncate">{item.name}</span>
-					<span class="shrink-0 text-sm text-gray-500">{size(item.size)}</span>
+					<span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg {iconColor(item)}">
+						{#if iconKind(item) === 'image'}
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8">
+								<rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+								<circle cx="9" cy="10" r="1.5" />
+								<path d="m4.5 17 5-4 3 2 3-3 4 4" />
+							</svg>
+						{:else if iconKind(item) === 'media'}
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor">
+								<path d="M8 5.8c0-.78.85-1.25 1.5-.84l9.1 5.7a1 1 0 0 1 0 1.68l-9.1 5.7A1 1 0 0 1 8 17.2z" />
+							</svg>
+						{:else if iconKind(item) === 'code'}
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-10-2 12" />
+							</svg>
+						{:else}
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+								<path d="M6 3.75h8l4.25 4.5v12H6z" />
+								<path d="M14 4v5h4m-9 4h6m-6 3h6" />
+								{#if iconKind(item) === 'pdf'}<path d="M8 18h7" stroke-width="2.5" />{/if}
+								{#if iconKind(item) === 'sheet'}<path d="M9 12v6m4-6v6m-4-3h7" />{/if}
+								{#if iconKind(item) === 'archive'}<path d="M11 10v2m0 2v2" stroke-width="2.5" />{/if}
+							</svg>
+						{/if}
+					</span>
+					<span class="min-w-0 flex-1 truncate text-sm">{item.name}</span>
+					<span class="shrink-0 text-xs tabular-nums text-gray-500">{size(item.size)}</span>
 				</a>
 			{/if}
+		{:else}
+			<p class="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">
+				{search ? 'No matching files or folders.' : 'This folder is empty.'}
+			</p>
 		{/each}
 	</section>
 </main>
