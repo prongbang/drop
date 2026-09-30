@@ -18,7 +18,7 @@ Listen on http://0.0.0.0:8000
 
 ### Install with the shell installer
 
-Requires Rust and Cargo. The installer builds and installs the latest version from GitHub.
+The installer downloads the prebuilt binary for macOS Apple silicon or Intel and copies it to `~/.local/bin`. It does not require Rust or Cargo.
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/prongbang/drop/main/install.sh | sh
@@ -30,14 +30,6 @@ curl -fsSL https://raw.githubusercontent.com/prongbang/drop/main/install.sh | sh
 brew update
 brew tap prongbang/homebrew-formulae
 brew install server
-```
-
-or
-
-### Install with Cargo
-
-```shell
-cargo install drop --git https://github.com/prongbang/drop.git
 ```
 
 ### Load Test Report

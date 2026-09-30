@@ -22,9 +22,9 @@
 	let dragActive = $state(false);
 	let isDark = $state(false);
 	let error = $state('');
+	let listError = $state('');
 	let picker: HTMLInputElement;
 	let uploadPicker: HTMLInputElement;
-	let uploading = $state(false);
 	let target = '';
 
 	// files wait here until the other side accepts
@@ -44,13 +44,20 @@
 	}
 
 	async function listDir() {
+		const at = path;
 		try {
-			const at = path;
-			const listing = await (await fetch(`/api/dir?path=${encodeURIComponent(at)}`)).json();
+			const response = await fetch(`/api/dir?path=${encodeURIComponent(at)}`);
+			if (!response.ok) throw new Error(`Directory API returned HTTP ${response.status}`);
+			const listing = await response.json();
 			// a poll that started before the last click must not drag the view back
-			if (at === path) items = listing.entries;
-		} catch {
-			// the server went away; the next tick will pick it back up
+			if (at === path) {
+				items = listing.entries;
+				listError = '';
+			}
+		} catch (e) {
+			if (at === path) {
+				listError = e instanceof Error ? `Could not load files: ${e.message}` : 'Could not reach the directory API';
+			}
 		}
 	}
 
@@ -112,7 +119,6 @@
 		const files = Array.from(list ?? []);
 		if (!files.length) return;
 		error = '';
-		uploading = true;
 		try {
 			for (const file of files) {
 				const res = await fetch(
@@ -124,8 +130,6 @@
 			await listDir();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Files could not be uploaded';
-		} finally {
-			uploading = false;
 		}
 	}
 
@@ -315,18 +319,13 @@
 					{/each}
 				</nav>
 			</div>
-			<button
-				class="inline-flex min-h-12 items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-600/20 transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-wait disabled:opacity-60"
-				disabled={uploading}
-				onclick={() => uploadPicker.click()}
-			>
-				<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5" /></svg>
-				{uploading ? 'Uploading…' : 'Upload files'}
-			</button>
 		</header>
 
 		{#if error}
 			<p role="alert" class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/60 dark:text-rose-200">{error}</p>
+		{/if}
+		{#if listError}
+			<p role="alert" class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/60 dark:text-rose-200">{listError}</p>
 		{/if}
 
 		<button

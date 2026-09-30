@@ -1,21 +1,31 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="https://github.com/prongbang/drop.git"
+REPOSITORY="https://raw.githubusercontent.com/prongbang/drop/main/bin"
+OS=$(uname -s)
+ARCH=$(uname -m)
 
-if ! command -v cargo >/dev/null 2>&1; then
-	cat >&2 <<'EOF'
-Rust and Cargo are required to install Drop.
-Install Rust from https://rustup.rs, then run this installer again.
-EOF
-	exit 1
-fi
+case "$OS/$ARCH" in
+	Darwin/arm64|Darwin/aarch64) PLATFORM="darwin-arm64" ;;
+	Darwin/x86_64) PLATFORM="darwin-x86_64" ;;
+	*)
+		printf 'Prebuilt Drop binary is not available for %s/%s.\n' "$OS" "$ARCH" >&2
+		exit 1
+		;;
+esac
 
-printf 'Installing Drop from %s\n' "$REPOSITORY"
-cargo install --git "$REPOSITORY" --force
+INSTALL_DIR=${DROP_INSTALL_DIR:-"$HOME/.local/bin"}
+TMP_FILE=$(mktemp "${TMPDIR:-/tmp}/drop.XXXXXX")
+trap 'rm -f "$TMP_FILE"' 0
+trap 'exit 1' HUP INT TERM
 
-CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+printf 'Downloading Drop for %s...\n' "$PLATFORM"
+curl -fsSL "$REPOSITORY/drop-$PLATFORM" -o "$TMP_FILE"
+mkdir -p "$INSTALL_DIR"
+install -m 755 "$TMP_FILE" "$INSTALL_DIR/drop"
+
+printf 'Installed Drop to %s/drop\n' "$INSTALL_DIR"
 case ":$PATH:" in
-	*":$CARGO_BIN:"*) ;;
-	*) printf 'Add %s to your PATH to run drop.\n' "$CARGO_BIN" ;;
+	*":$INSTALL_DIR:"*) ;;
+	*) printf 'Add %s to your PATH to run drop.\n' "$INSTALL_DIR" ;;
 esac
