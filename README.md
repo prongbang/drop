@@ -16,6 +16,14 @@ Listen on http://0.0.0.0:8000
 
 ## Install
 
+### Install with the shell installer
+
+Requires Rust and Cargo. The installer builds and installs the latest version from GitHub.
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/prongbang/server/main/install.sh | sh
+```
+
 ### Install with Homebrew
 
 ```shell
