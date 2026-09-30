@@ -1,11 +1,11 @@
-# server
+# Drop
 
 Rust-based HTTP server, serves any directory, inspired by `python -m http.server`.
 
 ## Using
 
 ```shell
-➜ server
+➜ drop
    ____
   / __/__ _____  _____ ____
  _\ \/ -_) __/ |/ / -_) __/
@@ -21,7 +21,7 @@ Listen on http://0.0.0.0:8000
 Requires Rust and Cargo. The installer builds and installs the latest version from GitHub.
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/prongbang/server/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/prongbang/drop/main/install.sh | sh
 ```
 
 ### Install with Homebrew
@@ -37,7 +37,7 @@ or
 ### Install with Cargo
 
 ```shell
-cargo install server --git https://github.com/prongbang/server.git
+cargo install drop --git https://github.com/prongbang/drop.git
 ```
 
 ### Load Test Report
