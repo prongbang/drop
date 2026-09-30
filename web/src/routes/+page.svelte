@@ -321,13 +321,6 @@
 			<div>
 				<p class="mb-1 text-sm font-medium text-indigo-600 dark:text-indigo-300">FILE MANAGER</p>
 				<h1 class="text-3xl font-semibold tracking-tight sm:text-4xl">Your files</h1>
-				<nav aria-label="Folder breadcrumb" class="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
-					<button class="rounded px-1 py-1 hover:text-indigo-600 focus-visible:outline-2 focus-visible:outline-indigo-500 dark:hover:text-indigo-300" onclick={() => go('')}>Home</button>
-					{#each segments as segment, i}
-						<span aria-hidden="true">/</span>
-						<button class="max-w-48 truncate rounded px-1 py-1 hover:text-indigo-600 focus-visible:outline-2 focus-visible:outline-indigo-500 dark:hover:text-indigo-300" onclick={() => go(segments.slice(0, i + 1).join('/'))}>{segment}</button>
-					{/each}
-				</nav>
 			</div>
 		</header>
 
@@ -372,6 +365,13 @@
 				<div>
 					<h2 class="font-semibold">Files</h2>
 					<p class="text-sm text-slate-500 dark:text-slate-400">{visibleItems.length} {visibleItems.length === 1 ? 'item' : 'items'}</p>
+					<nav aria-label="Folder breadcrumb" class="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+						<button class="rounded px-1 py-1 hover:text-indigo-600 focus-visible:outline-2 focus-visible:outline-indigo-500 dark:hover:text-indigo-300" aria-current={segments.length ? undefined : 'page'} onclick={() => go('')}>Home</button>
+						{#each segments as segment, i}
+							<span aria-hidden="true">/</span>
+							<button class="max-w-48 truncate rounded px-1 py-1 hover:text-indigo-600 focus-visible:outline-2 focus-visible:outline-indigo-500 dark:hover:text-indigo-300" aria-current={i === segments.length - 1 ? 'page' : undefined} onclick={() => go(segments.slice(0, i + 1).join('/'))}>{segment}</button>
+						{/each}
+					</nav>
 				</div>
 				{#if segments.length}
 					<button class="min-h-11 rounded-lg px-3 text-sm font-medium text-indigo-600 hover:bg-indigo-50 focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-indigo-300 dark:hover:bg-indigo-400/10" onclick={() => go(segments.slice(0, -1).join('/'))}>← Parent folder</button>
