@@ -31,6 +31,8 @@
 	const staged = new Map<number, File>();
 
 	const ask = $derived(transfers.find((t) => t.incoming && t.stage === 'pending'));
+	const receivedFiles = $derived(transfers.filter((t) => t.incoming && t.stage === 'ready'));
+	const recentTransfers = $derived(transfers.filter((t) => !(t.incoming && t.stage === 'ready')));
 
 	function apply(state: { name: string; peers: Peer[]; transfers: Transfer[] }) {
 		myName = state.name;
@@ -296,10 +298,10 @@
 			{/each}
 		</section>
 
-		{#if transfers.length}
+		{#if recentTransfers.length}
 			<section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm shadow-slate-900/[0.03] dark:border-slate-800 dark:bg-slate-900">
 				<h2 class="mb-3 text-sm font-semibold">Recent transfers</h2>
-				{#each transfers as transfer (transfer.id)}
+				{#each recentTransfers as transfer (transfer.id)}
 					<div class="flex items-center gap-2 border-t border-slate-100 py-3 first:border-0 dark:border-slate-800">
 						<span class="min-w-0 flex-1">
 							<span class="block truncate text-sm font-medium">{transfer.name}</span>
@@ -412,6 +414,49 @@
 						<span class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500"><svg aria-hidden="true" viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.75h8l4.25 4.5v12H6zM14 4v5h4M9 13h6m-6 3h4" /></svg></span>
 						<p class="font-medium">{search ? 'No matching files' : 'This folder is empty'}</p>
 						<p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{search ? 'Try a different name.' : 'Upload a file or drop it here to get started.'}</p>
+					</div>
+				{/each}
+			</div>
+		</section>
+
+		<section aria-labelledby="received-files-title" class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-900/[0.03] dark:border-slate-800 dark:bg-slate-900">
+			<header class="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-4 sm:px-5 dark:border-slate-800">
+				<div>
+					<p class="text-xs font-semibold uppercase tracking-wide text-indigo-600 dark:text-indigo-300">From other devices</p>
+					<h2 id="received-files-title" class="mt-1 text-lg font-semibold">Received files</h2>
+				</div>
+				<span class="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{receivedFiles.length}</span>
+			</header>
+			<div>
+				{#each receivedFiles as transfer (transfer.id)}
+					{@const receivedItem = { name: transfer.name, size: transfer.size, dir: false }}
+					{@const kind = iconKind(receivedItem)}
+					<div class="flex min-h-[76px] items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-0 sm:gap-4 sm:px-5 dark:border-slate-800">
+						<span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl {iconColor(receivedItem)}">
+							{#if kind === 'image'}
+								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m4.5 17 5-4 3 2 3-3 4 4" /></svg>
+							{:else if kind === 'media'}
+								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor"><path d="M8 5.8c0-.78.85-1.25 1.5-.84l9.1 5.7a1 1 0 0 1 0 1.68l-9.1 5.7A1 1 0 0 1 8 17.2z" /></svg>
+							{:else if kind === 'code'}
+								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-10-2 12" /></svg>
+							{:else}
+								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3.75h8l4.25 4.5v12H6z" /><path d="M14 4v5h4m-9 4h6m-6 3h6" /></svg>
+							{/if}
+						</span>
+						<span class="min-w-0 flex-1">
+							<span class="block truncate text-sm font-semibold">{transfer.name}</span>
+							<span class="mt-1 block truncate text-xs text-slate-500 dark:text-slate-400">From {transfer.peer} <span aria-hidden="true">·</span> {size(transfer.size)}</span>
+						</span>
+						<a class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 sm:px-4 dark:border-indigo-800 dark:bg-indigo-400/10 dark:text-indigo-300 dark:hover:bg-indigo-400/20" href="/api/transfer/{transfer.id}?me={me}" download={transfer.name} aria-label="Download {transfer.name}">
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+							<span class="hidden sm:inline">Download</span>
+						</a>
+					</div>
+				{:else}
+					<div class="px-5 py-10 text-center">
+						<span class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500"><svg aria-hidden="true" viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5" /></svg></span>
+						<p class="font-medium">No received files yet</p>
+						<p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Files sent from another device will appear here.</p>
 					</div>
 				{/each}
 			</div>
