@@ -1,14 +1,14 @@
 @import 'tailwindcss';
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
 	html {
 		background: white;
-		color-scheme: light dark;
+		color-scheme: light;
 	}
 
-	@media (prefers-color-scheme: dark) {
-		html {
-			background: var(--color-gray-950);
-		}
+	html.dark {
+		background: var(--color-gray-950);
+		color-scheme: dark;
 	}
 }
