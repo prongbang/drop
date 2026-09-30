@@ -24,6 +24,9 @@ The installer downloads the prebuilt binary for macOS Apple silicon or Intel and
 curl -fsSL https://raw.githubusercontent.com/prongbang/drop/main/install.sh | sh
 ```
 
+When a newer version is published, Drop shows an update notice at startup. Run
+`drop update` to download and install the latest prebuilt version.
+
 ### Install with Homebrew
 
 ```shell

@@ -7,6 +7,7 @@ use qrcode::render::unicode;
 use qrcode::QrCode;
 use rust_embed::RustEmbed;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::process::Command as ProcessCommand;
 use warp::http::header::CONTENT_TYPE;
 use warp::http::{Response, StatusCode};
 use warp::path::Tail;
@@ -52,18 +53,105 @@ fn serve_embedded(path: &str) -> Response<Vec<u8>> {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<SubCommand>,
     #[arg(short, long, default_value_t = 8000)]
     port: u16,
     #[arg(short, long, default_value_t = false)]
     silent: bool,
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum SubCommand {
+    /// Update Drop to the latest published version
+    Update,
+}
+
+fn check_for_update() {
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(latest) = latest_release().filter(|latest| is_newer(latest, current)) {
+        println!("\nA new Drop version is available: v{latest} (current: v{current}). Run `drop update` to install it.\n");
+    }
+}
+
+fn latest_release() -> Option<String> {
+    let output = ProcessCommand::new("curl")
+        .args(["-fsSL", "--max-time", "3", "https://api.github.com/repos/prongbang/drop/releases/latest"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let release: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    release["tag_name"]
+        .as_str()
+        .map(|tag| tag.trim_start_matches('v').to_owned())
+}
+
+fn is_newer(candidate: &str, current: &str) -> bool {
+    let parse = |version: &str| {
+        version
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match (parse(candidate), parse(current)) {
+        (Ok(candidate), Ok(current)) => candidate > current,
+        _ => false,
+    }
+}
+
+fn update() -> Result<(), String> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let platform = match (os, arch) {
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x86_64",
+        _ => return Err(format!("Prebuilt Drop binary is not available for {os}/{arch}")),
+    };
+
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let parent = executable.parent().ok_or("Cannot locate the installed Drop directory")?;
+    let filename = executable.file_name().ok_or("Cannot locate the installed Drop filename")?;
+    let destination = parent.join(filename);
+    let temporary = parent.join(format!(".drop-update-{}", std::process::id()));
+    let version = latest_release().ok_or("Could not find the latest GitHub release. Try again later.")?;
+    let url = format!("https://raw.githubusercontent.com/prongbang/drop/{version}/bin/drop-{platform}");
+    let status = ProcessCommand::new("curl")
+        .args(["-fsSL", &url, "-o"])
+        .arg(&temporary)
+        .status()
+        .map_err(|error| format!("Could not run curl: {error}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err("Download failed. Check your network and try again.".into());
+    }
+    let install = ProcessCommand::new("install")
+        .arg("-m")
+        .arg("755")
+        .arg(&temporary)
+        .arg(&destination)
+        .status()
+        .map_err(|error| format!("Could not install the update: {error}"))?;
+    let _ = std::fs::remove_file(&temporary);
+    if !install.success() {
+        return Err(format!("Could not replace {}. Check write permissions.", destination.display()));
+    }
+    println!("Updated Drop successfully. Run `drop --version` to see the installed version.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
-    let version = "0.2.3";
-
     // Parse command line arguments
     let args = Args::parse();
+    if let Some(SubCommand::Update) = args.command {
+        if let Err(error) = update() {
+            eprintln!("Update failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let version = env!("CARGO_PKG_VERSION");
 
     // Get the current directory
     let current_dir = std::env::current_dir().expect("Failed to get current directory");
@@ -114,6 +202,7 @@ Listen on http://{}:{}
 Network   {}
 
 {}"#, version, ip, addr.1, url, qr_code(&url)));
+    tokio::task::spawn_blocking(check_for_update);
 
     // Start the Warp server with only the static assets filter
     if args.silent {
