@@ -2,6 +2,10 @@
 
 Rust-based HTTP server, serves any directory, inspired by `python -m http.server`.
 
+<p align="center">
+  <img src="docs/images/drop-cover.png" alt="Drop local file sharing app and file manager" width="960">
+</p>
+
 ## Using
 
 ```shell
