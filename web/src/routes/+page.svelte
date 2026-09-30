@@ -43,6 +43,16 @@
 		}
 	}
 
+	function createPeerId() {
+		try {
+			const id = globalThis.crypto?.randomUUID?.();
+			if (id) return id;
+		} catch {
+			// randomUUID may be unavailable outside secure contexts, such as HTTP on a LAN.
+		}
+		return `peer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+	}
+
 	async function listDir() {
 		const at = path;
 		try {
@@ -62,7 +72,7 @@
 	}
 
 	$effect(() => {
-		me = localStorage.getItem('peer') ?? crypto.randomUUID();
+		me = localStorage.getItem('peer') ?? createPeerId();
 		localStorage.setItem('peer', me);
 
 		// presence and transfers are pushed; the stream staying open is what keeps us listed
