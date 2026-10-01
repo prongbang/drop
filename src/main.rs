@@ -114,16 +114,15 @@ fn update() -> Result<(), String> {
     let filename = executable.file_name().ok_or("Cannot locate the installed Drop filename")?;
     let destination = parent.join(filename);
     let temporary = parent.join(format!(".drop-update-{}", std::process::id()));
-    let version = latest_release().ok_or("Could not find the latest GitHub release. Try again later.")?;
-    let url = format!("https://raw.githubusercontent.com/prongbang/drop/{version}/bin/drop-{platform}");
-    let status = ProcessCommand::new("curl")
+    let url = format!("https://raw.githubusercontent.com/prongbang/drop/main/bin/drop-{platform}");
+    let download = ProcessCommand::new("curl")
         .args(["-fsSL", &url, "-o"])
         .arg(&temporary)
         .status()
         .map_err(|error| format!("Could not run curl: {error}"))?;
-    if !status.success() {
+    if !download.success() {
         let _ = std::fs::remove_file(&temporary);
-        return Err("Download failed. Check your network and try again.".into());
+        return Err(format!("Could not download {url}"));
     }
     let install = ProcessCommand::new("install")
         .arg("-m")
