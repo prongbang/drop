@@ -32,6 +32,7 @@ enum SignalKind {
     Offer,
     Answer,
     Candidate,
+    Fallback,
 }
 
 #[derive(Clone, Deserialize)]
@@ -74,6 +75,7 @@ struct Transfer {
     mime: String,
     stage: Stage,
     direct: bool,
+    relay: bool,
     data: Option<Bytes>,
     signals: Vec<QueuedSignal>,
 }
@@ -111,6 +113,7 @@ struct TransferView {
     size: u64,
     stage: Stage,
     direct: bool,
+    relay: bool,
     incoming: bool,
 }
 
@@ -226,6 +229,7 @@ impl Hub {
                         size: t.size,
                         stage: t.stage,
                         direct: t.direct,
+                        relay: t.relay,
                         incoming,
                     }
                 })
@@ -274,6 +278,7 @@ impl Hub {
                 mime: req.mime,
                 stage: Stage::Pending,
                 direct: false,
+                relay: false,
                 data: None,
                 signals: Vec::new(),
             });
@@ -316,6 +321,7 @@ impl Hub {
                     t.size = data.len() as u64;
                     t.data = Some(data);
                     t.stage = Stage::Ready;
+                    t.relay = true;
                     true
                 }
                 _ => false,
@@ -343,6 +349,9 @@ impl Hub {
                 || transfer.signals.len() >= MAX_SIGNALS_PER_TRANSFER
             {
                 return None;
+            }
+            if req.kind == SignalKind::Fallback {
+                transfer.relay = true;
             }
             let to = if transfer.from == me {
                 transfer.to.clone()
@@ -604,6 +613,7 @@ mod tests {
 
         assert!(hub.take("b", id).is_some());
         assert!(hub.take("a", id).is_some());
+        assert!(hub.state("b").transfers[0].relay);
         assert!(hub.take("c", id).is_none(), "a bystander cannot fetch it");
         assert_eq!(
             hub.state("c").transfers.len(),
@@ -657,6 +667,17 @@ mod tests {
                 }
             )
             .is_none());
+        assert!(hub
+            .signal(
+                "b",
+                SignalReq {
+                    id,
+                    kind: SignalKind::Fallback,
+                    data: serde_json::json!({ "reason": "unsupported" }),
+                }
+            )
+            .is_some());
+        assert!(hub.state("a").transfers[0].relay);
     }
 
     #[test]
