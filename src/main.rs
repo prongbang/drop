@@ -164,6 +164,11 @@ async fn main() {
 
     // Peer-to-peer file transfers, plus a listing of this directory
     let api = drop::routes(drop::Hub::default()).or(browse::routes(current_dir.clone()));
+    // Prevent unknown API calls from falling through to the UI/SPA fallback,
+    // which returns index.html with 200 and makes failed uploads look successful.
+    let api_not_found = warp::path("api")
+        .and(warp::path::tail())
+        .map(|_| warp::reply::with_status("API route not found", StatusCode::NOT_FOUND));
 
     // CORS
     let cors = warp::cors()
@@ -206,11 +211,11 @@ Network   {}
 
     // Start the Warp server with only the static assets filter
     if args.silent {
-        let routes = api.or(drop_ui).or(drop_assets).or(static_dir).or(index_html).or(embedded).with(cors);
+        let routes = api.or(api_not_found).or(drop_ui).or(drop_assets).or(static_dir).or(index_html).or(embedded).with(cors);
         warp::serve(routes).run(addr).await;
     } else {
         logger::setup_logging();
-        let routes = api.or(drop_ui).or(drop_assets).or(static_dir).or(index_html).or(embedded).with(cors).with(logger::log());
+        let routes = api.or(api_not_found).or(drop_ui).or(drop_assets).or(static_dir).or(index_html).or(embedded).with(cors).with(logger::log());
         warp::serve(routes).run(addr).await;
     };
 }

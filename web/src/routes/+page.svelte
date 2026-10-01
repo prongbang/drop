@@ -137,7 +137,13 @@
 					`/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
 					{ method: 'POST', body: file }
 				);
-				if (!res.ok) throw new Error(`${file.name} could not be uploaded`);
+				if (res.status !== 201) {
+					if (res.status === 404 || res.headers.get('content-type')?.includes('text/html')) {
+						throw new Error('This Drop server does not support uploads yet. Update and restart Drop, then try again.');
+					}
+					const detail = (await res.text()).trim();
+					throw new Error(detail || `${file.name} could not be uploaded (HTTP ${res.status})`);
+				}
 			}
 			await listDir();
 		} catch (e) {
