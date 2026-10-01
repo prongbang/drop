@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import { DEFAULT_CHUNK_SIZE, sendBlobChunks } from '$lib/transfer';
+	import { DEFAULT_CHUNK_SIZE, progressPercent, sendBlobChunks, uploadBlobWithProgress } from '$lib/transfer';
 
 	type Peer = { id: string; name: string };
 	type Signal = {
@@ -21,6 +21,7 @@
 		relay: boolean;
 	};
 	type TransferProgress = { sent: number; total: number; transport: 'direct' | 'relay'; durationMs?: number };
+	type UploadProgress = { id: number; name: string; sent: number; total: number };
 	type DirectSession = {
 		id: number;
 		role: 'sender' | 'receiver';
@@ -48,10 +49,12 @@
 	let items = $state<Item[]>([]);
 	let directUrls = $state<Record<number, string>>({});
 	let progress = $state<Record<number, TransferProgress>>({});
+	let uploads = $state<UploadProgress[]>([]);
 	let path = $state('');
 	let search = $state('');
 	let dragging = $state('');
 	let dragActive = $state(false);
+	let nextUploadId = 0;
 	let isDark = $state(false);
 	let error = $state('');
 	let listError = $state('');
@@ -484,12 +487,11 @@
 	async function upload(id: number) {
 		const file = staged.get(id);
 		if (!file) return;
-		const response = await fetch(`/api/upload/${id}?me=${encodeURIComponent(me)}`, {
-			method: 'POST',
-			headers: { 'content-type': file.type || 'application/octet-stream' },
-			body: file
-		});
-		if (!response.ok) throw new Error(`${file.name} could not be sent (HTTP ${response.status})`);
+		await uploadBlobWithProgress(
+			file,
+			`/api/upload/${id}?me=${encodeURIComponent(me)}`,
+			(sent, total) => updateProgress(id, sent, total, 'relay')
+		);
 		staged.delete(id);
 	}
 
@@ -507,16 +509,24 @@
 		error = '';
 		try {
 			for (const file of files) {
-				const res = await fetch(
-					`/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
-					{ method: 'POST', body: file }
-				);
-				if (res.status !== 201) {
-					if (res.status === 404 || res.headers.get('content-type')?.includes('text/html')) {
+				const id = ++nextUploadId;
+				uploads = [...uploads, { id, name: file.name, sent: 0, total: file.size }];
+				try {
+					await uploadBlobWithProgress(
+						file,
+						`/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
+						(sent, total) => {
+							uploads = uploads.map((upload) => upload.id === id ? { ...upload, sent, total } : upload);
+						}
+					);
+				} catch (e) {
+					const message = e instanceof Error ? e.message : 'Upload failed';
+					if (message.includes('HTTP 404')) {
 						throw new Error('This Drop server does not support uploads yet. Update and restart Drop, then try again.');
 					}
-					const detail = (await res.text()).trim();
-					throw new Error(detail || `${file.name} could not be uploaded (HTTP ${res.status})`);
+					throw new Error(`${file.name} could not be uploaded: ${message}`);
+				} finally {
+					uploads = uploads.filter((upload) => upload.id !== id);
 				}
 			}
 			await listDir();
@@ -536,10 +546,9 @@
 		}
 		if (transfer.stage === 'accepted') {
 			const current = progress[transfer.id];
+			if (current) return `${current.transport === 'direct' ? 'Direct' : 'Server relay'} · ${progressPercent(current.sent, current.total)}%`;
 			if (transfer.relay) return 'server relay…';
-			if (!current) return 'connecting directly…';
-			const percent = current.total ? Math.floor((current.sent / current.total) * 100) : 0;
-			return `${current.transport === 'direct' ? 'Direct' : 'Relay'} · ${percent}%`;
+			return 'connecting directly…';
 		}
 		return transfer.incoming ? 'waiting for you' : 'waiting for accept';
 	}
@@ -698,10 +707,29 @@
 			<section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm shadow-slate-900/[0.03] dark:border-slate-800 dark:bg-slate-900">
 				<h2 class="mb-3 text-sm font-semibold">Recent transfers</h2>
 				{#each recentTransfers as transfer (transfer.id)}
+					{@const current = progress[transfer.id]}
+					{@const percent = current ? progressPercent(current.sent, current.total) : 0}
 					<div class="flex items-center gap-2 border-t border-slate-100 py-3 first:border-0 dark:border-slate-800">
 						<span class="min-w-0 flex-1">
 							<span class="block truncate text-sm font-medium">{transfer.name}</span>
 							<span class="block truncate text-xs text-slate-500 dark:text-slate-400">{transfer.incoming ? 'From' : 'To'} {transfer.peer} · {size(transfer.size)}</span>
+							{#if transfer.stage === 'accepted'}
+								<span class="mt-2 flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+									<span>{current ? (current.transport === 'direct' ? 'Sending directly' : 'Sending via server') : 'Preparing transfer'}</span>
+									<span class="shrink-0 tabular-nums">{size(current?.sent ?? 0)} / {size(current?.total ?? transfer.size)} · {percent}%</span>
+								</span>
+								<span
+									role="progressbar"
+									aria-label="Sending {transfer.name}"
+									aria-valuemin="0"
+									aria-valuemax="100"
+									aria-valuenow={percent}
+									aria-valuetext="{size(current?.sent ?? 0)} of {size(current?.total ?? transfer.size)}, {percent}%"
+									class="mt-1.5 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+								>
+									<span class="block h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-150" style:width="{percent}%"></span>
+								</span>
+							{/if}
 						</span>
 						{#if transfer.incoming && transfer.stage === 'ready'}
 							<a class="rounded-lg px-2.5 py-2 text-xs font-semibold text-indigo-600 hover:bg-indigo-50 dark:text-indigo-300 dark:hover:bg-indigo-400/10" href="/api/transfer/{transfer.id}?me={me}" download={transfer.name}>Download</a>
@@ -727,6 +755,30 @@
 		{/if}
 		{#if listError}
 			<p role="alert" class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/60 dark:text-rose-200">{listError}</p>
+		{/if}
+		{#if uploads.length}
+			<section aria-label="Uploads in progress" class="space-y-3 rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm dark:border-indigo-900/70 dark:bg-slate-900">
+				{#each uploads as upload (upload.id)}
+					{@const percent = progressPercent(upload.sent, upload.total)}
+					<div>
+						<div class="flex items-center justify-between gap-3 text-sm">
+							<span class="min-w-0 truncate font-medium">Uploading {upload.name}</span>
+							<span class="shrink-0 tabular-nums text-slate-500 dark:text-slate-400">{size(upload.sent)} / {size(upload.total)} · {percent}%</span>
+						</div>
+						<span
+							role="progressbar"
+							aria-label="Uploading {upload.name}"
+							aria-valuemin="0"
+							aria-valuemax="100"
+							aria-valuenow={percent}
+							aria-valuetext="{size(upload.sent)} of {size(upload.total)}, {percent}%"
+							class="mt-2 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+						>
+							<span class="block h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-150" style:width="{percent}%"></span>
+						</span>
+					</div>
+				{/each}
+			</section>
 		{/if}
 
 		<button

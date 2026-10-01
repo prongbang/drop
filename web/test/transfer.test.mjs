@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chunkOffsets, sendBlobChunks } from '../src/lib/transfer.ts';
+import { chunkOffsets, progressPercent, sendBlobChunks, uploadBlobWithProgress } from '../src/lib/transfer.ts';
 
 class FakeChannel extends EventTarget {
 	readyState = 'open';
@@ -19,6 +19,38 @@ class FakeChannel extends EventTarget {
 }
 
 describe('file transfer chunks', () => {
+	test('clamps visible transfer progress to a percentage', () => {
+		expect(progressPercent(1, 3)).toBe(33);
+		expect(progressPercent(12, 10)).toBe(100);
+		expect(progressPercent(4, 0)).toBe(0);
+	});
+
+	test('reports relay upload progress and resolves after the server accepts it', async () => {
+		const original = globalThis.XMLHttpRequest;
+		let request;
+		globalThis.XMLHttpRequest = class {
+			upload = {};
+			status = 0;
+			open(method, url) { this.method = method; this.url = url; }
+			setRequestHeader(name, value) { this.header = [name, value]; }
+			send(body) { this.body = body; request = this; }
+		};
+		try {
+			const progress = [];
+			const file = new Blob(['payload'], { type: 'application/octet-stream' });
+			const sending = uploadBlobWithProgress(file, '/api/upload/1', (sent, total) => progress.push([sent, total]));
+			request.upload.onprogress({ lengthComputable: true, loaded: 4, total: 7 });
+			request.status = 201;
+			request.onload();
+			await sending;
+			expect(request.method).toBe('POST');
+			expect(request.body).toBe(file);
+			expect(progress).toEqual([[4, 7], [7, 7]]);
+		} finally {
+			globalThis.XMLHttpRequest = original;
+		}
+	});
+
 	test('creates bounded contiguous offsets and handles an empty file', () => {
 		expect(chunkOffsets(0, 4)).toEqual([]);
 		expect(chunkOffsets(10, 4)).toEqual([
