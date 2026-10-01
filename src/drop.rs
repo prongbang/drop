@@ -14,14 +14,52 @@ use warp::Filter;
 // ponytail: transfers live in RAM and die with the process; spill to a temp dir if you need bigger files
 const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_TRANSFERS: usize = 50;
+const MAX_SIGNAL_BYTES: usize = 64 * 1024;
+const MAX_SIGNALS_PER_TRANSFER: usize = 128;
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Stage {
     Pending,
     Accepted,
     Declined,
     Ready,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum SignalKind {
+    Offer,
+    Answer,
+    Candidate,
+}
+
+#[derive(Clone, Deserialize)]
+struct SignalReq {
+    id: u64,
+    kind: SignalKind,
+    data: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct SignalAckReq {
+    id: u64,
+    sequence: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct SignalView {
+    id: u64,
+    sequence: u64,
+    from: String,
+    kind: SignalKind,
+    data: serde_json::Value,
+}
+
+struct QueuedSignal {
+    sequence: u64,
+    to: String,
+    view: SignalView,
 }
 
 struct Transfer {
@@ -35,7 +73,9 @@ struct Transfer {
     size: u64,
     mime: String,
     stage: Stage,
+    direct: bool,
     data: Option<Bytes>,
+    signals: Vec<QueuedSignal>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +110,7 @@ struct TransferView {
     name: String,
     size: u64,
     stage: Stage,
+    direct: bool,
     incoming: bool,
 }
 
@@ -78,6 +119,7 @@ struct StateView {
     name: String,
     peers: Vec<PeerView>,
     transfers: Vec<TransferView>,
+    signals: Vec<SignalView>,
 }
 
 #[derive(Default)]
@@ -85,6 +127,7 @@ struct Inner {
     peers: HashMap<String, String>,
     transfers: Vec<Transfer>,
     next_id: u64,
+    next_signal: u64,
 }
 
 #[derive(Clone)]
@@ -161,7 +204,10 @@ impl Hub {
                 .peers
                 .iter()
                 .filter(|(id, _)| id.as_str() != me)
-                .map(|(id, name)| PeerView { id: id.clone(), name: name.clone() })
+                .map(|(id, name)| PeerView {
+                    id: id.clone(),
+                    name: name.clone(),
+                })
                 .collect(),
             transfers: inner
                 .transfers
@@ -171,12 +217,28 @@ impl Hub {
                     let incoming = t.to == me;
                     TransferView {
                         id: t.id,
-                        peer: if incoming { t.from_name.clone() } else { t.to_name.clone() },
+                        peer: if incoming {
+                            t.from_name.clone()
+                        } else {
+                            t.to_name.clone()
+                        },
                         name: t.name.clone(),
                         size: t.size,
                         stage: t.stage,
+                        direct: t.direct,
                         incoming,
                     }
+                })
+                .collect(),
+            signals: inner
+                .transfers
+                .iter()
+                .flat_map(|transfer| {
+                    transfer
+                        .signals
+                        .iter()
+                        .filter(move |signal| signal.to == me)
+                        .map(|signal| signal.view.clone())
                 })
                 .collect(),
         }
@@ -211,7 +273,9 @@ impl Hub {
                 size: req.size,
                 mime: req.mime,
                 stage: Stage::Pending,
+                direct: false,
                 data: None,
+                signals: Vec::new(),
             });
             let overflow = inner.transfers.len().saturating_sub(MAX_TRANSFERS);
             inner.transfers.drain(..overflow);
@@ -227,7 +291,11 @@ impl Hub {
             let mut inner = self.inner.lock().unwrap();
             match inner.transfers.iter_mut().find(|t| t.id == req.id) {
                 Some(t) if t.to == me && t.stage == Stage::Pending => {
-                    t.stage = if req.accept { Stage::Accepted } else { Stage::Declined };
+                    t.stage = if req.accept {
+                        Stage::Accepted
+                    } else {
+                        Stage::Declined
+                    };
                     true
                 }
                 _ => false,
@@ -259,6 +327,94 @@ impl Hub {
         done
     }
 
+    fn signal(&self, me: &str, req: SignalReq) -> Option<u64> {
+        if serde_json::to_vec(&req.data).ok()?.len() > MAX_SIGNAL_BYTES {
+            return None;
+        }
+        let sequence = {
+            let mut inner = self.inner.lock().unwrap();
+            let sequence = inner.next_signal;
+            let transfer = inner
+                .transfers
+                .iter_mut()
+                .find(|transfer| transfer.id == req.id)?;
+            if transfer.stage != Stage::Accepted
+                || transfer.from != me && transfer.to != me
+                || transfer.signals.len() >= MAX_SIGNALS_PER_TRANSFER
+            {
+                return None;
+            }
+            let to = if transfer.from == me {
+                transfer.to.clone()
+            } else {
+                transfer.from.clone()
+            };
+            transfer.signals.push(QueuedSignal {
+                sequence,
+                to,
+                view: SignalView {
+                    id: req.id,
+                    sequence,
+                    from: me.to_string(),
+                    kind: req.kind,
+                    data: req.data,
+                },
+            });
+            inner.next_signal += 1;
+            sequence
+        };
+        self.announce();
+        Some(sequence)
+    }
+
+    fn ack_signal(&self, me: &str, id: u64, sequence: u64) -> bool {
+        let removed = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(transfer) = inner
+                .transfers
+                .iter_mut()
+                .find(|transfer| transfer.id == id)
+            else {
+                return false;
+            };
+            let Some(index) = transfer
+                .signals
+                .iter()
+                .position(|signal| signal.sequence == sequence && signal.to == me)
+            else {
+                return false;
+            };
+            transfer.signals.remove(index);
+            true
+        };
+        if removed {
+            self.announce();
+        }
+        removed
+    }
+
+    fn complete(&self, me: &str, id: u64) -> bool {
+        let done = {
+            let mut inner = self.inner.lock().unwrap();
+            match inner
+                .transfers
+                .iter_mut()
+                .find(|transfer| transfer.id == id)
+            {
+                Some(transfer) if transfer.to == me && transfer.stage == Stage::Accepted => {
+                    transfer.stage = Stage::Ready;
+                    transfer.direct = true;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if done {
+            self.announce();
+        }
+        done
+    }
+
     fn take(&self, me: &str, id: u64) -> Option<(String, String, Bytes)> {
         let inner = self.inner.lock().unwrap();
         let t = inner.transfers.iter().find(|t| t.id == id)?;
@@ -270,9 +426,22 @@ impl Hub {
     }
 
     // One state push on connect, then one per change, until the browser goes away.
-    fn events(&self, me: String, ua: String) -> impl Stream<Item = Result<warp::sse::Event, Infallible>> {
+    fn events(
+        &self,
+        me: String,
+        ua: String,
+    ) -> impl Stream<Item = Result<warp::sse::Event, Infallible>> {
         self.join(&me, &ua);
-        let seed = (self.changed.subscribe(), self.clone(), me.clone(), Presence { hub: self.clone(), id: me }, true);
+        let seed = (
+            self.changed.subscribe(),
+            self.clone(),
+            me.clone(),
+            Presence {
+                hub: self.clone(),
+                id: me,
+            },
+            true,
+        );
         stream::unfold(seed, |(mut changed, hub, me, presence, first)| async move {
             if !first {
                 // a lagged receiver only missed intermediate states; the next one is current
@@ -288,12 +457,18 @@ impl Hub {
     }
 }
 
-pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+pub fn routes(
+    hub: Hub,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
     let hub = warp::any().map(move || hub.clone());
     let ok = |good: bool| {
         warp::reply::with_status(
             warp::reply::json(&good),
-            if good { StatusCode::OK } else { StatusCode::CONFLICT },
+            if good {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            },
         )
     };
 
@@ -303,7 +478,9 @@ pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = wa
         .and(warp::header::optional::<String>("user-agent"))
         .and(hub.clone())
         .map(|me: Me, ua: Option<String>, hub: Hub| {
-            warp::sse::reply(warp::sse::keep_alive().stream(hub.events(me.me, ua.unwrap_or_default())))
+            warp::sse::reply(
+                warp::sse::keep_alive().stream(hub.events(me.me, ua.unwrap_or_default())),
+            )
         });
 
     let offer = warp::path!("api" / "offer")
@@ -311,10 +488,12 @@ pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = wa
         .and(warp::query::<Me>())
         .and(warp::body::json())
         .and(hub.clone())
-        .map(|me: Me, req: OfferReq, hub: Hub| match hub.offer(&me.me, req) {
-            Some(id) => warp::reply::with_status(warp::reply::json(&id), StatusCode::OK),
-            None => warp::reply::with_status(warp::reply::json(&()), StatusCode::CONFLICT),
-        });
+        .map(
+            |me: Me, req: OfferReq, hub: Hub| match hub.offer(&me.me, req) {
+                Some(id) => warp::reply::with_status(warp::reply::json(&id), StatusCode::OK),
+                None => warp::reply::with_status(warp::reply::json(&()), StatusCode::CONFLICT),
+            },
+        );
 
     let respond = warp::path!("api" / "respond")
         .and(warp::post())
@@ -331,6 +510,36 @@ pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = wa
         .and(hub.clone())
         .map(move |id: u64, me: Me, data: Bytes, hub: Hub| ok(hub.upload(&me.me, id, data)));
 
+    let signal = warp::path!("api" / "signal")
+        .and(warp::post())
+        .and(warp::query::<Me>())
+        .and(warp::body::content_length_limit(MAX_SIGNAL_BYTES as u64))
+        .and(warp::body::json())
+        .and(hub.clone())
+        .map(
+            |me: Me, req: SignalReq, hub: Hub| match hub.signal(&me.me, req) {
+                Some(sequence) => {
+                    warp::reply::with_status(warp::reply::json(&sequence), StatusCode::OK)
+                }
+                None => warp::reply::with_status(warp::reply::json(&()), StatusCode::CONFLICT),
+            },
+        );
+
+    let signal_ack = warp::path!("api" / "signal" / "ack")
+        .and(warp::post())
+        .and(warp::query::<Me>())
+        .and(warp::body::json())
+        .and(hub.clone())
+        .map(move |me: Me, req: SignalAckReq, hub: Hub| {
+            ok(hub.ack_signal(&me.me, req.id, req.sequence))
+        });
+
+    let complete = warp::path!("api" / "complete" / u64)
+        .and(warp::post())
+        .and(warp::query::<Me>())
+        .and(hub.clone())
+        .map(move |id: u64, me: Me, hub: Hub| ok(hub.complete(&me.me, id)));
+
     let download = warp::path!("api" / "transfer" / u64)
         .and(warp::get())
         .and(warp::query::<Me>())
@@ -338,7 +547,10 @@ pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = wa
         .map(|id: u64, me: Me, hub: Hub| match hub.take(&me.me, id) {
             Some((name, mime, data)) => Response::builder()
                 .header(CONTENT_TYPE, mime)
-                .header(CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", name))
+                .header(
+                    CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", name),
+                )
                 .body(data)
                 .unwrap(),
             None => Response::builder()
@@ -347,7 +559,14 @@ pub fn routes(hub: Hub) -> impl Filter<Extract = (impl warp::Reply,), Error = wa
                 .unwrap(),
         });
 
-    events.or(offer).or(respond).or(upload).or(download)
+    events
+        .or(offer)
+        .or(respond)
+        .or(upload)
+        .or(signal)
+        .or(signal_ack)
+        .or(complete)
+        .or(download)
 }
 
 #[cfg(test)]
@@ -356,7 +575,12 @@ mod tests {
     use futures_util::StreamExt;
 
     fn offer_req(to: &str) -> OfferReq {
-        OfferReq { to: to.into(), name: "note.txt".into(), size: 3, mime: "text/plain".into() }
+        OfferReq {
+            to: to.into(),
+            name: "note.txt".into(),
+            size: 3,
+            mime: "text/plain".into(),
+        }
     }
 
     #[test]
@@ -371,14 +595,21 @@ mod tests {
 
         // nothing moves until the receiver accepts
         assert!(!hub.upload("a", id, Bytes::from("hi")));
-        assert!(!hub.respond("c", RespondReq { id, accept: true }), "only b decides");
+        assert!(
+            !hub.respond("c", RespondReq { id, accept: true }),
+            "only b decides"
+        );
         assert!(hub.respond("b", RespondReq { id, accept: true }));
         assert!(hub.upload("a", id, Bytes::from("hi")));
 
         assert!(hub.take("b", id).is_some());
         assert!(hub.take("a", id).is_some());
         assert!(hub.take("c", id).is_none(), "a bystander cannot fetch it");
-        assert_eq!(hub.state("c").transfers.len(), 0, "and never sees it listed");
+        assert_eq!(
+            hub.state("c").transfers.len(),
+            0,
+            "and never sees it listed"
+        );
         assert_eq!(hub.state("b").transfers.len(), 1);
     }
 
@@ -393,6 +624,79 @@ mod tests {
         assert!(hub.take("b", id).is_none());
     }
 
+    #[test]
+    fn signaling_is_visible_only_to_the_other_transfer_participant() {
+        let hub = Hub::default();
+        for peer in ["a", "b", "c"] {
+            hub.join(peer, "");
+        }
+        let id = hub.offer("a", offer_req("b")).unwrap();
+        hub.respond("b", RespondReq { id, accept: true });
+
+        let sequence = hub
+            .signal(
+                "a",
+                SignalReq {
+                    id,
+                    kind: SignalKind::Offer,
+                    data: serde_json::json!({ "sdp": "offer" }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(hub.state("b").signals.len(), 1);
+        assert_eq!(hub.state("b").signals[0].sequence, sequence);
+        assert_eq!(hub.state("c").signals.len(), 0);
+        assert!(hub
+            .signal(
+                "c",
+                SignalReq {
+                    id,
+                    kind: SignalKind::Answer,
+                    data: serde_json::json!({ "sdp": "intrusion" }),
+                }
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn receiver_can_complete_a_direct_transfer_but_sender_cannot() {
+        let hub = Hub::default();
+        hub.join("a", "");
+        hub.join("b", "");
+        let id = hub.offer("a", offer_req("b")).unwrap();
+        hub.respond("b", RespondReq { id, accept: true });
+
+        assert!(!hub.complete("a", id));
+        assert_eq!(hub.state("b").transfers[0].stage, Stage::Accepted);
+        assert!(hub.complete("b", id));
+        assert_eq!(hub.state("b").transfers[0].stage, Stage::Ready);
+        assert!(hub.state("b").transfers[0].direct);
+    }
+
+    #[test]
+    fn receiver_acknowledges_a_signal_once() {
+        let hub = Hub::default();
+        hub.join("a", "");
+        hub.join("b", "");
+        let id = hub.offer("a", offer_req("b")).unwrap();
+        hub.respond("b", RespondReq { id, accept: true });
+        let sequence = hub
+            .signal(
+                "a",
+                SignalReq {
+                    id,
+                    kind: SignalKind::Offer,
+                    data: serde_json::json!({ "sdp": "offer" }),
+                },
+            )
+            .unwrap();
+
+        assert!(hub.ack_signal("b", id, sequence));
+        assert!(!hub.ack_signal("b", id, sequence));
+        assert!(hub.state("b").signals.is_empty());
+    }
+
     #[tokio::test]
     async fn the_stream_pushes_on_change_and_presence_ends_with_it() {
         let hub = Hub::default();
@@ -403,9 +707,17 @@ mod tests {
 
         hub.join("b", "iPhone Safari");
         assert!(events.next().await.is_some(), "b joining wakes a");
-        assert_eq!(hub.state("b").peers.len(), 1, "b sees a while a is streaming");
+        assert_eq!(
+            hub.state("b").peers.len(),
+            1,
+            "b sees a while a is streaming"
+        );
 
         drop(events);
-        assert_eq!(hub.state("b").peers.len(), 0, "a is gone when its stream is");
+        assert_eq!(
+            hub.state("b").peers.len(),
+            0,
+            "a is gone when its stream is"
+        );
     }
 }
