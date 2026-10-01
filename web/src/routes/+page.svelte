@@ -11,7 +11,7 @@
 		incoming: boolean;
 	};
 	type TransferProgress = { sent: number; total: number };
-	type UploadProgress = { id: number; name: string; sent: number; total: number };
+	type UploadProgress = { id: number; name: string; destination: string; sent: number; total: number };
 	type Item = { name: string; size: number; dir: boolean };
 	type IconKind = 'folder' | 'image' | 'media' | 'pdf' | 'code' | 'sheet' | 'text' | 'archive' | 'file';
 
@@ -138,13 +138,16 @@
 	async function uploadFiles(list: FileList | null) {
 		const files = Array.from(list ?? []);
 		if (!files.length) return;
+		// Keep the whole batch in the folder selected when upload began, even if
+		// the user navigates to another folder while a large file is transferring.
+		const destination = path;
 		error = '';
 		try {
 			for (const file of files) {
 				const id = ++nextUploadId;
-				uploads = [...uploads, { id, name: file.name, sent: 0, total: file.size }];
+				uploads = [...uploads, { id, name: file.name, destination, sent: 0, total: file.size }];
 				try {
-					await uploadBlobWithProgress(file, `/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`, (sent, total) => {
+					await uploadBlobWithProgress(file, `/api/files?path=${encodeURIComponent(destination)}&name=${encodeURIComponent(file.name)}`, (sent, total) => {
 						uploads = uploads.map((upload) => upload.id === id ? { ...upload, sent, total } : upload);
 					});
 				} catch (e) {
@@ -370,7 +373,7 @@
 					{@const percent = progressPercent(upload.sent, upload.total)}
 					<div>
 						<div class="flex items-center justify-between gap-3 text-sm">
-							<span class="min-w-0 truncate font-medium">Uploading {upload.name}</span>
+							<span class="min-w-0 truncate font-medium">Uploading {upload.name} to {upload.destination || 'Home'}</span>
 							<span class="shrink-0 tabular-nums text-slate-500 dark:text-slate-400">{size(upload.sent)} / {size(upload.total)} · {percent}%</span>
 						</div>
 						<span role="progressbar" aria-label="Uploading {upload.name}" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent} aria-valuetext="{size(upload.sent)} of {size(upload.total)}, {percent}%" class="mt-2 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
@@ -395,6 +398,10 @@
 			</span>
 			<span class="text-lg font-semibold">{dragActive ? 'Drop files to upload' : 'Drop files here to upload'}</span>
 			<span class="mt-1 text-sm text-slate-500 dark:text-slate-400">or choose files from your device</span>
+			<span class="mt-3 rounded-full bg-white/80 px-3 py-1.5 text-sm text-slate-600 dark:bg-slate-900/80 dark:text-slate-300" aria-live="polite">
+				Upload destination: <span class="font-semibold text-indigo-700 dark:text-indigo-300">Home{#each segments as segment} / {segment}{/each}</span>
+			</span>
+			<span class="mt-2 text-xs text-slate-500 dark:text-slate-400">Open a folder below to change the destination.</span>
 			<span class="mt-4 inline-flex min-h-11 items-center rounded-lg border border-indigo-200 bg-white px-4 text-sm font-semibold text-indigo-700 shadow-sm dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300">Browse files</span>
 		</button>
 
