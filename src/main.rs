@@ -161,7 +161,7 @@ async fn main() {
     // Create a Warp filter to handle requests for static assets
     let static_dir = warp::fs::dir(current_path);
 
-    // Peer-to-peer file transfers, plus a listing of this directory
+    // Server-relayed file transfers, plus a listing of this directory
     let api = drop::routes(drop::Hub::default()).or(browse::routes(current_dir.clone()));
     // Prevent unknown API calls from falling through to the UI/SPA fallback,
     // which returns index.html with 200 and makes failed uploads look successful.

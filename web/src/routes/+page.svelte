@@ -1,15 +1,7 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
-	import { DEFAULT_CHUNK_SIZE, progressPercent, sendBlobChunks, uploadBlobWithProgress } from '$lib/transfer';
+	import { progressPercent, uploadBlobWithProgress } from '$lib/transfer';
 
 	type Peer = { id: string; name: string };
-	type Signal = {
-		id: number;
-		sequence: number;
-		from: string;
-		kind: 'offer' | 'answer' | 'candidate' | 'fallback';
-		data: unknown;
-	};
 	type Transfer = {
 		id: number;
 		peer: string;
@@ -17,28 +9,9 @@
 		size: number;
 		stage: 'pending' | 'accepted' | 'declined' | 'ready';
 		incoming: boolean;
-		direct: boolean;
-		relay: boolean;
 	};
-	type TransferProgress = { sent: number; total: number; transport: 'direct' | 'relay'; durationMs?: number };
+	type TransferProgress = { sent: number; total: number };
 	type UploadProgress = { id: number; name: string; sent: number; total: number };
-	type DirectSession = {
-		id: number;
-		role: 'sender' | 'receiver';
-		pc: RTCPeerConnection;
-		channel?: RTCDataChannel;
-		file?: File;
-		parts: BlobPart[];
-		receivedBytes: number;
-		startedAt?: number;
-		lastProgressAt?: number;
-		incoming?: { name: string; size: number; mime: string };
-		remoteCandidates: RTCIceCandidateInit[];
-		signalQueue: Promise<void>;
-		finished: boolean;
-		resolveAck?: () => void;
-		rejectAck?: (error: Error) => void;
-	};
 	type Item = { name: string; size: number; dir: boolean };
 	type IconKind = 'folder' | 'image' | 'media' | 'pdf' | 'code' | 'sheet' | 'text' | 'archive' | 'file';
 
@@ -47,7 +20,6 @@
 	let peers = $state<Peer[]>([]);
 	let transfers = $state<Transfer[]>([]);
 	let items = $state<Item[]>([]);
-	let directUrls = $state<Record<number, string>>({});
 	let progress = $state<Record<number, TransferProgress>>({});
 	let uploads = $state<UploadProgress[]>([]);
 	let path = $state('');
@@ -64,40 +36,21 @@
 
 	// files wait here until the other side accepts
 	const staged = new Map<number, File>();
-	const sessions = new Map<number, DirectSession>();
-	const attempted = new Set<number>();
-	const relaying = new Set<number>();
-	const seenSignals = new Set<number>();
 
 	const ask = $derived(transfers.find((t) => t.incoming && t.stage === 'pending'));
 	const receivedFiles = $derived(transfers.filter((t) => t.incoming && t.stage === 'ready'));
 	const recentTransfers = $derived(transfers.filter((t) => !(t.incoming && t.stage === 'ready')));
 
-	function apply(state: { name: string; peers: Peer[]; transfers: Transfer[]; signals?: Signal[] }) {
+	function apply(state: { name: string; peers: Peer[]; transfers: Transfer[] }) {
 		myName = state.name;
 		peers = state.peers;
 		transfers = state.transfers;
 		for (const transfer of transfers) {
-			if (transfer.stage === 'accepted') {
-				if (transfer.relay && transfer.incoming) {
-					const session = sessions.get(transfer.id);
-					if (session) closeSession(session);
-				}
-				if (!transfer.relay && transfer.incoming && !sessions.has(transfer.id)) createReceiverSession(transfer.id);
-				if (!transfer.relay && !transfer.incoming && staged.has(transfer.id) && !attempted.has(transfer.id)) {
-					attempted.add(transfer.id);
-					void startDirectSender(transfer.id);
-				}
+			if (!transfer.incoming && transfer.stage === 'accepted' && staged.has(transfer.id)) {
+				const file = staged.get(transfer.id)!;
+				staged.delete(transfer.id);
+				void upload(transfer.id, file);
 			}
-			if (transfer.stage === 'ready' && transfer.direct) {
-				sessions.get(transfer.id)?.resolveAck?.();
-			} else if (transfer.stage === 'ready' && !transfer.direct && transfer.incoming) {
-				const session = sessions.get(transfer.id);
-				if (session) closeSession(session);
-			}
-		}
-		for (const signal of [...(state.signals ?? [])].sort((a, b) => a.sequence - b.sequence)) {
-			queueSignal(signal);
 		}
 	}
 
@@ -159,340 +112,19 @@
 					mime: file.type || 'application/octet-stream'
 				})
 			});
-			if (res.ok) {
-				const id = await res.json();
-				staged.set(id, file);
-				if (transfers.some((transfer) => transfer.id === id && !transfer.incoming && transfer.stage === 'accepted') && !attempted.has(id)) {
-					attempted.add(id);
-					void startDirectSender(id);
-				}
-			} else error = `${file.name} could not be offered (over 100 MB, or the device left)`;
+			if (res.ok) staged.set(await res.json(), file);
+			else error = `${file.name} could not be offered (over 100 MB, or the device left)`;
 		}
 	}
 
-	function createSession(id: number, role: 'sender' | 'receiver', file?: File): DirectSession {
-		const pc = new RTCPeerConnection({ iceServers: [] });
-		const session: DirectSession = {
-			id,
-			role,
-			pc,
-			file,
-			parts: [],
-			receivedBytes: 0,
-			remoteCandidates: [],
-			signalQueue: Promise.resolve(),
-			finished: false
-		};
-		sessions.set(id, session);
-		pc.onconnectionstatechange = () => {
-			if (pc.connectionState !== 'failed' || session.finished) return;
-			if (role === 'sender') void fallbackRelay(id, session);
-			else void requestRelay(session, 'The direct connection failed.');
-		};
-		return session;
-	}
-
-	function createReceiverSession(id: number) {
-		if (typeof RTCPeerConnection === 'undefined') return;
+	async function upload(id: number, file: File) {
 		try {
-			const session = createSession(id, 'receiver');
-			session.pc.ondatachannel = (event) => {
-				session.channel = event.channel;
-				setupReceiverChannel(session, event.channel);
-			};
-		} catch {
-			// The sender will use the relay if this browser cannot create a peer connection.
-		}
-	}
-
-	async function postSignal(id: number, kind: Signal['kind'], data: unknown) {
-		const response = await fetch(`/api/signal?me=${encodeURIComponent(me)}`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ id, kind, data })
-		});
-		if (!response.ok) throw new Error(`Signaling returned HTTP ${response.status}`);
-	}
-
-	async function acknowledgeSignal(signal: Signal) {
-		await fetch(`/api/signal/ack?me=${encodeURIComponent(me)}`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ id: signal.id, sequence: signal.sequence })
-		});
-	}
-
-	function waitForIce(pc: RTCPeerConnection) {
-		if (pc.iceGatheringState === 'complete') return Promise.resolve();
-		return new Promise<void>((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				pc.removeEventListener('icegatheringstatechange', check);
-				reject(new Error('ICE candidate gathering timed out'));
-			}, 8000);
-			const check = () => {
-				if (pc.iceGatheringState !== 'complete') return;
-				clearTimeout(timeout);
-				pc.removeEventListener('icegatheringstatechange', check);
-				resolve();
-			};
-			pc.addEventListener('icegatheringstatechange', check);
-			check();
-		});
-	}
-
-	function waitForChannel(channel: RTCDataChannel) {
-		if (channel.readyState === 'open') return Promise.resolve();
-		return new Promise<void>((resolve, reject) => {
-			const cleanup = () => {
-				clearTimeout(timeout);
-				channel.removeEventListener('open', open);
-				channel.removeEventListener('close', close);
-			};
-			const open = () => {
-				cleanup();
-				resolve();
-			};
-			const close = () => {
-				cleanup();
-				reject(new Error('Data channel closed before connecting'));
-			};
-			const timeout = setTimeout(() => {
-				cleanup();
-				reject(new Error('Direct connection timed out'));
-			}, 15000);
-			channel.addEventListener('open', open);
-			channel.addEventListener('close', close);
-			if (channel.readyState === 'open') open();
-		});
-	}
-
-	async function sendDescription(session: DirectSession, kind: 'offer' | 'answer') {
-		await waitForIce(session.pc);
-		const description = session.pc.localDescription;
-		if (!description?.sdp) throw new Error('WebRTC description was empty');
-		await postSignal(session.id, kind, { type: description.type, sdp: description.sdp });
-	}
-
-	async function startDirectSender(id: number) {
-		const file = staged.get(id);
-		if (!file) return;
-		let session: DirectSession | undefined;
-		try {
-			if (typeof RTCPeerConnection === 'undefined') throw new Error('WebRTC is unavailable');
-			session = createSession(id, 'sender', file);
-			const channel = session.pc.createDataChannel('drop-file', { ordered: true });
-			session.channel = channel;
-			channel.binaryType = 'arraybuffer';
-			channel.onmessage = (event) => {
-				if (event.data === 'received') session?.resolveAck?.();
-				if (event.data === 'failed') session?.rejectAck?.(new Error('Receiver could not save the direct transfer'));
-			};
-			updateProgress(id, 0, file.size, 'direct');
-			const received = new Promise<void>((resolve, reject) => {
-				session!.resolveAck = resolve;
-				session!.rejectAck = reject;
+			await uploadBlobWithProgress(file, `/api/upload/${id}?me=${encodeURIComponent(me)}`, (sent, total) => {
+				progress = { ...progress, [id]: { sent, total } };
 			});
-			void received.catch(() => {});
-
-			const offer = await session.pc.createOffer();
-			await session.pc.setLocalDescription(offer);
-			await sendDescription(session, 'offer');
-			await waitForChannel(channel);
-			channel.send(JSON.stringify({ type: 'file', name: file.name, size: file.size, mime: file.type || 'application/octet-stream' }));
-			const chunkSize = Math.min(256 * 1024, session.pc.sctp?.maxMessageSize ?? DEFAULT_CHUNK_SIZE);
-			let lastUpdate = 0;
-			await sendBlobChunks(file, channel, (sent) => {
-				const now = performance.now();
-				if (sent === file.size || now - lastUpdate >= 100) {
-					lastUpdate = now;
-					updateProgress(id, sent, file.size, 'direct');
-				}
-			}, chunkSize);
-			channel.send(JSON.stringify({ type: 'finish' }));
-			const waitMs = Math.max(30000, (file.size / (512 * 1024)) * 1000 + 10000);
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			try {
-				await Promise.race([
-					received,
-					new Promise<never>((_, reject) => {
-						timeout = setTimeout(() => reject(new Error('Receiver did not confirm the transfer')), waitMs);
-					})
-				]);
-			} finally {
-				if (timeout) clearTimeout(timeout);
-			}
-			staged.delete(id);
-			session.finished = true;
-			closeSession(session);
 		} catch (e) {
-			await fallbackRelay(id, session);
+			error = e instanceof Error ? `${file.name} could not be sent: ${e.message}` : `${file.name} could not be sent`;
 		}
-	}
-
-	function updateProgress(id: number, sent: number, total: number, transport: 'direct' | 'relay', durationMs?: number) {
-		progress = { ...progress, [id]: { sent, total, transport, ...(durationMs ? { durationMs } : {}) } };
-	}
-
-	function setupReceiverChannel(session: DirectSession, channel: RTCDataChannel) {
-		channel.binaryType = 'arraybuffer';
-		channel.onmessage = (event) => {
-			void receiveData(session, channel, event.data).catch((e) => {
-				void requestRelay(session, e instanceof Error ? e.message : 'The direct transfer failed.');
-			});
-		};
-		channel.onclose = () => {
-			if (!session.finished) void requestRelay(session, 'The direct connection closed.');
-		};
-		channel.onerror = () => {
-			if (!session.finished) void requestRelay(session, 'The direct connection failed.');
-		};
-	}
-
-	async function receiveData(session: DirectSession, channel: RTCDataChannel, data: unknown) {
-		if (typeof data === 'string') {
-			const message = JSON.parse(data) as { type: string; name?: string; size?: number; mime?: string };
-			if (message.type === 'file') {
-				const transfer = transfers.find((item) => item.id === session.id && item.incoming);
-				if (!transfer || message.name !== transfer.name || message.size !== transfer.size) {
-					throw new Error('The sender file details did not match the transfer offer');
-				}
-				session.incoming = {
-					name: message.name,
-					size: message.size,
-					mime: message.mime || 'application/octet-stream'
-				};
-				session.startedAt = performance.now();
-				updateProgress(session.id, 0, message.size, 'direct');
-				return;
-			}
-			if (message.type === 'finish') {
-				const incoming = session.incoming;
-				if (!incoming || session.receivedBytes !== incoming.size) throw new Error('The received file was incomplete');
-				const blob = new Blob(session.parts, { type: incoming.mime });
-				const response = await fetch(`/api/complete/${session.id}?me=${encodeURIComponent(me)}`, { method: 'POST' });
-				if (!response.ok) throw new Error(`Could not complete the transfer (HTTP ${response.status})`);
-				directUrls = { ...directUrls, [session.id]: URL.createObjectURL(blob) };
-				const durationMs = Math.max(1, performance.now() - (session.startedAt ?? performance.now()));
-				updateProgress(session.id, incoming.size, incoming.size, 'direct', durationMs);
-				session.finished = true;
-				channel.send('received');
-				return;
-			}
-			return;
-		}
-		if (!(data instanceof ArrayBuffer) || !session.incoming) throw new Error('Unexpected data received from peer');
-		session.receivedBytes += data.byteLength;
-		if (session.receivedBytes > session.incoming.size) throw new Error('The received file exceeded its offered size');
-		session.parts.push(data);
-		const now = performance.now();
-		if (session.receivedBytes === session.incoming.size || now - (session.lastProgressAt ?? 0) >= 100) {
-			session.lastProgressAt = now;
-			updateProgress(session.id, session.receivedBytes, session.incoming.size, 'direct');
-		}
-	}
-
-	function queueSignal(signal: Signal) {
-		if (seenSignals.has(signal.sequence)) return;
-		seenSignals.add(signal.sequence);
-		const session = sessions.get(signal.id);
-		if (!session) {
-			if (signal.kind === 'offer') {
-				void postSignal(signal.id, 'fallback', { reason: 'WebRTC is unavailable' })
-					.catch(() => {})
-					.finally(() => acknowledgeSignal(signal).catch(() => {}));
-			} else {
-				void acknowledgeSignal(signal).catch(() => seenSignals.delete(signal.sequence));
-			}
-			return;
-		}
-		session.signalQueue = session.signalQueue.then(async () => {
-			try {
-				if (signal.kind === 'fallback') {
-					if (session.role === 'sender') await fallbackRelay(signal.id, session);
-					else closeSession(session);
-				} else if (signal.kind === 'offer' && session.role === 'receiver') {
-					await session.pc.setRemoteDescription(signal.data as RTCSessionDescriptionInit);
-					for (const candidate of session.remoteCandidates.splice(0)) await session.pc.addIceCandidate(candidate);
-					const answer = await session.pc.createAnswer();
-					await session.pc.setLocalDescription(answer);
-					await sendDescription(session, 'answer');
-				} else if (signal.kind === 'answer' && session.role === 'sender') {
-					await session.pc.setRemoteDescription(signal.data as RTCSessionDescriptionInit);
-					for (const candidate of session.remoteCandidates.splice(0)) await session.pc.addIceCandidate(candidate);
-				} else if (signal.kind === 'candidate') {
-					const candidate = signal.data as RTCIceCandidateInit;
-					if (session.pc.remoteDescription) await session.pc.addIceCandidate(candidate);
-					else session.remoteCandidates.push(candidate);
-				}
-			} catch (e) {
-				if (session.role === 'sender') await fallbackRelay(signal.id, session);
-				else await requestRelay(session, e instanceof Error ? e.message : 'WebRTC negotiation failed.');
-			}
-			try {
-				await acknowledgeSignal(signal);
-			} catch {
-				seenSignals.delete(signal.sequence);
-			}
-		});
-	}
-
-	async function requestRelay(session: DirectSession, reason: string) {
-		if (session.finished) return;
-		session.finished = true;
-		try {
-			await postSignal(session.id, 'fallback', { reason });
-		} catch {
-			// The sender also falls back after its connection attempt fails or times out.
-		}
-		closeSession(session);
-	}
-
-	async function fallbackRelay(id: number, session?: DirectSession) {
-		if (relaying.has(id)) return;
-		relaying.add(id);
-		if (!transfers.find((transfer) => transfer.id === id)?.relay) {
-			try {
-				await postSignal(id, 'fallback', { reason: 'Using the server relay' });
-			} catch {
-				// Older servers do not expose signaling, but still support the relay upload.
-			}
-		}
-		if (session) {
-			session.rejectAck?.(new Error('Switching to server relay'));
-			closeSession(session);
-		}
-		const file = staged.get(id);
-		if (file) updateProgress(id, 0, file.size, 'relay');
-		try {
-			await upload(id);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'The file could not be sent';
-		} finally {
-			relaying.delete(id);
-		}
-	}
-
-	function closeSession(session: DirectSession) {
-		session.finished = true;
-		session.pc.onconnectionstatechange = null;
-		session.pc.close();
-		if (sessions.get(session.id) === session) sessions.delete(session.id);
-	}
-
-	onDestroy(() => {
-		for (const session of sessions.values()) closeSession(session);
-		for (const url of Object.values(directUrls)) URL.revokeObjectURL(url);
-	});
-
-	async function upload(id: number) {
-		const file = staged.get(id);
-		if (!file) return;
-		await uploadBlobWithProgress(
-			file,
-			`/api/upload/${id}?me=${encodeURIComponent(me)}`,
-			(sent, total) => updateProgress(id, sent, total, 'relay')
-		);
-		staged.delete(id);
 	}
 
 	async function respond(id: number, accept: boolean) {
@@ -512,13 +144,9 @@
 				const id = ++nextUploadId;
 				uploads = [...uploads, { id, name: file.name, sent: 0, total: file.size }];
 				try {
-					await uploadBlobWithProgress(
-						file,
-						`/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`,
-						(sent, total) => {
-							uploads = uploads.map((upload) => upload.id === id ? { ...upload, sent, total } : upload);
-						}
-					);
+					await uploadBlobWithProgress(file, `/api/files?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`, (sent, total) => {
+						uploads = uploads.map((upload) => upload.id === id ? { ...upload, sent, total } : upload);
+					});
 				} catch (e) {
 					const message = e instanceof Error ? e.message : 'Upload failed';
 					if (message.includes('HTTP 404')) {
@@ -537,18 +165,10 @@
 
 	function status(transfer: Transfer) {
 		if (transfer.stage === 'declined') return 'declined';
-		if (transfer.stage === 'ready') {
-			if (transfer.incoming) return '';
-			const current = progress[transfer.id];
-			return transfer.direct && current?.durationMs
-				? `sent directly · ${transferRate(transfer.size, current.durationMs)}`
-				: transfer.direct ? 'sent directly' : 'sent via relay';
-		}
+		if (transfer.stage === 'ready') return transfer.incoming ? '' : 'sent';
 		if (transfer.stage === 'accepted') {
 			const current = progress[transfer.id];
-			if (current) return `${current.transport === 'direct' ? 'Direct' : 'Server relay'} · ${progressPercent(current.sent, current.total)}%`;
-			if (transfer.relay) return 'server relay…';
-			return 'connecting directly…';
+			return current ? `Sending · ${progressPercent(current.sent, current.total)}%` : 'Preparing transfer…';
 		}
 		return transfer.incoming ? 'waiting for you' : 'waiting for accept';
 	}
@@ -616,10 +236,6 @@
 			unit++;
 		}
 		return `${n < 10 && unit > 0 ? n.toFixed(1) : Math.round(n)} ${units[unit]}`;
-	}
-
-	function transferRate(bytes: number, durationMs: number) {
-		return `${size(bytes / (durationMs / 1000))}/s`;
 	}
 </script>
 
@@ -715,18 +331,10 @@
 							<span class="block truncate text-xs text-slate-500 dark:text-slate-400">{transfer.incoming ? 'From' : 'To'} {transfer.peer} · {size(transfer.size)}</span>
 							{#if transfer.stage === 'accepted'}
 								<span class="mt-2 flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-									<span>{current ? (current.transport === 'direct' ? 'Sending directly' : 'Sending via server') : 'Preparing transfer'}</span>
+									<span>{current ? 'Sending through server' : 'Preparing transfer'}</span>
 									<span class="shrink-0 tabular-nums">{size(current?.sent ?? 0)} / {size(current?.total ?? transfer.size)} · {percent}%</span>
 								</span>
-								<span
-									role="progressbar"
-									aria-label="Sending {transfer.name}"
-									aria-valuemin="0"
-									aria-valuemax="100"
-									aria-valuenow={percent}
-									aria-valuetext="{size(current?.sent ?? 0)} of {size(current?.total ?? transfer.size)}, {percent}%"
-									class="mt-1.5 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
-								>
+								<span role="progressbar" aria-label="Sending {transfer.name}" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent} aria-valuetext="{size(current?.sent ?? 0)} of {size(current?.total ?? transfer.size)}, {percent}%" class="mt-1.5 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
 									<span class="block h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-150" style:width="{percent}%"></span>
 								</span>
 							{/if}
@@ -765,15 +373,7 @@
 							<span class="min-w-0 truncate font-medium">Uploading {upload.name}</span>
 							<span class="shrink-0 tabular-nums text-slate-500 dark:text-slate-400">{size(upload.sent)} / {size(upload.total)} · {percent}%</span>
 						</div>
-						<span
-							role="progressbar"
-							aria-label="Uploading {upload.name}"
-							aria-valuemin="0"
-							aria-valuemax="100"
-							aria-valuenow={percent}
-							aria-valuetext="{size(upload.sent)} of {size(upload.total)}, {percent}%"
-							class="mt-2 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
-						>
+						<span role="progressbar" aria-label="Uploading {upload.name}" aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent} aria-valuetext="{size(upload.sent)} of {size(upload.total)}, {percent}%" class="mt-2 block h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
 							<span class="block h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-150" style:width="{percent}%"></span>
 						</span>
 					</div>
@@ -893,21 +493,12 @@
 						</span>
 						<span class="min-w-0 flex-1">
 							<span class="block truncate text-sm font-semibold">{transfer.name}</span>
-							<span class="mt-1 block truncate text-xs text-slate-500 dark:text-slate-400">From {transfer.peer} <span aria-hidden="true">·</span> {size(transfer.size)} <span aria-hidden="true">·</span> {transfer.direct ? 'Direct' : 'Server relay'}{#if progress[transfer.id]?.durationMs} <span aria-hidden="true">·</span> {transferRate(transfer.size, progress[transfer.id].durationMs!)}{/if}</span>
+							<span class="mt-1 block truncate text-xs text-slate-500 dark:text-slate-400">From {transfer.peer} <span aria-hidden="true">·</span> {size(transfer.size)}</span>
 						</span>
-						{#if directUrls[transfer.id]}
-							<a class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 sm:px-4 dark:border-indigo-800 dark:bg-indigo-400/10 dark:text-indigo-300 dark:hover:bg-indigo-400/20" href={directUrls[transfer.id]} download={transfer.name} aria-label="Download {transfer.name}">
-								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
-								<span class="hidden sm:inline">Download</span>
-							</a>
-						{:else if transfer.direct}
-							<span class="shrink-0 text-right text-xs text-slate-500 dark:text-slate-400">Only in the<br />original page</span>
-						{:else}
-							<a class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 sm:px-4 dark:border-indigo-800 dark:bg-indigo-400/10 dark:text-indigo-300 dark:hover:bg-indigo-400/20" href="/api/transfer/{transfer.id}?me={me}" download={transfer.name} aria-label="Download {transfer.name}">
-								<svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
-								<span class="hidden sm:inline">Download</span>
-							</a>
-						{/if}
+						<a class="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 sm:px-4 dark:border-indigo-800 dark:bg-indigo-400/10 dark:text-indigo-300 dark:hover:bg-indigo-400/20" href="/api/transfer/{transfer.id}?me={me}" download={transfer.name} aria-label="Download {transfer.name}">
+							<svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+							<span class="hidden sm:inline">Download</span>
+						</a>
 					</div>
 				{:else}
 					<div class="px-5 py-10 text-center">
